@@ -20,9 +20,9 @@ namespace TestClient
         public Client(string serverIP, int serverPort, string name = null)
         {
             this.name = name;
-            net = new NewNet(100, new IPEndPoint(IPAddress.Parse("192.168.1.100"), 0), name);
+            net = new NewNet(100, new IPEndPoint(IPAddress.Parse("192.168.1.100"), 5001), name);
             serverEndpoint = new IPEndPoint(IPAddress.Parse(serverIP), serverPort);
-            sendSample = new byte[10];
+            sendSample = new byte[100];
         }
 
         public void Start()
@@ -37,14 +37,14 @@ namespace TestClient
 
         public void Sending()
         {
-            while (sending)
+            var i = 0;
+            while (sending&&i<10000)
             {
                 if (serverId >= 0)
                 {
-                    net.Log.Info("sending message, {0}", DateTime.Now.ToString("hh.mm.ss.ffffff"));
-                    net.Send(serverId, sendSample, true);
+                    net.Send(serverId, sendSample, false);
+                    i++;
                 }
-                Thread.Sleep(1);
             }
         }
 
@@ -54,40 +54,32 @@ namespace TestClient
             while (receiving)
             {
                 var netEvent = net.Receive();
-
-                switch (netEvent.type)
+                if (netEvent != null)
                 {
-                    case NetEventType.Connected:
-                        string ip;
-                        int port;
-                        string err;
-                        net.GetConnectionInfo(netEvent.connId, out ip, out port, out err);
-                        if (new IPEndPoint(IPAddress.Parse(ip), port).Equals(serverEndpoint))
-                        {
-                            net.Log.Info("Connected to server, connId {0}", netEvent.connId);
-                            serverId = netEvent.connId;
-                            if (sendingThread == null)
+                    switch (netEvent.type)
+                    {
+                        case NetEventType.Connected:
+                            string ip;
+                            int port;
+                            string err;
+                            net.GetConnectionInfo(netEvent.connId, out ip, out port, out err);
+                            if (new IPEndPoint(IPAddress.Parse(ip), port).Equals(serverEndpoint))
                             {
-                                sendingThread = new Thread(Sending);
-                                sending = true;
-                                sendingThread.Start();
+                                serverId = netEvent.connId;
+                                if (sendingThread == null)
+                                {
+                                    sendingThread = new Thread(Sending);
+                                    sending = true;
+                                    sendingThread.Start();
+                                }
                             }
-                            else
-                            {
-                                net.Log.Info("Sending thread already started");
-                            }
-                        }
-                        else
-                        {
-                            net.Log.Info("Connected {0}:{1}, connId {2}", ip, port, netEvent.connId);
-                        }
 
-                        break;
-                    case NetEventType.Data:
-                        net.Log.Info("Data received from connId {0}, {1} bytes", netEvent.connId,
-                            netEvent.data.Length);
-                        break;
+                            break;
+                        case NetEventType.Data:
+                            break;
+                    }
                 }
+
             }
         }
     }
@@ -115,18 +107,29 @@ namespace TestClient
 
         public void Receiving()
         {
+            var t1 = DateTime.Now;
             while (receiving)
             {
                 var netEvent = net.Receive();
-                switch (netEvent.type)
+                if (netEvent != null)
                 {
-                    case NetEventType.Connected:
-                        string ip;
-                        int port;
-                        string err;
-                        net.GetConnectionInfo(netEvent.connId, out ip, out port, out err);
-                        net.Log.Info("Connected {0}:{1}, connId {2}", ip, port, netEvent.connId);
-                        break;
+                    switch (netEvent.type)
+                    {
+                        case NetEventType.Connected:
+                            string ip;
+                            int port;
+                            string err;
+                            net.GetConnectionInfo(netEvent.connId, out ip, out port, out err);
+                            break;
+                        case NetEventType.Data:
+                            if (!netEvent.reliable && netEvent.sequenceId % 1000 == 0)
+                            {
+                                Console.WriteLine(
+                                    $"{netEvent.sequenceId} unreliable messages received at {DateTime.Now - t1}");
+                            }
+
+                            break;
+                    }
                 }
             }
         }
@@ -134,27 +137,14 @@ namespace TestClient
 
     class Program
     {
-        static void Logging()
-        {
-            while (true)
-            {
-                Logs.WriteMultithreadedLogs();
-            }
-        }
-
         static void Main(string[] args)
         {
-            var th = new Thread(Logging);
-            th.Start();
             var server = new Server("192.168.1.100", 5000, "Server");
             var client1 = new Client("192.168.1.100", 5000, "Client1");
 
             server.Start();
 
             client1.Start();
-            
-
-            
         }
     }
 }

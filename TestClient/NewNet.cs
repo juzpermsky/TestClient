@@ -76,7 +76,6 @@ namespace Network
 
 
 //			Debug.Log(DateTime.Now.ToString("hh.mm.ss.ffffff") + ":received seqs: " + s);
-            connection.newNet.Log.Info("received seqs: " + s);
 
             // Разобрали все сообщения, из reliable пакета. Теперь можно составить ack пакет
             var ack = recentSeqId;
@@ -91,7 +90,6 @@ namespace Network
                 bw.Write(ackBits);
 
 //				Debug.Log(DateTime.Now.ToString("hh.mm.ss.ffffff") + ":sending ack: " + ack);
-                connection.newNet.Log.Info("sending ack: " + ack);
                 connection.Send(ms.GetBuffer(), "ack: " + ack);
             }
 
@@ -334,7 +332,6 @@ namespace Network
             var ack = br.ReadUInt16();
             //string sacks = "" + ack;
             var ackBits = br.ReadUInt32();
-            connection.newNet.Log.Info("received ack: {0}", ack);
             var rawSndMsg = GetRawMsg(ack);
             if (rawSndMsg != null)
             {
@@ -441,8 +438,6 @@ namespace Network
 //						Debug.LogFormat("end sending {0}", packetData.Length);
 //						Debug.LogFormat("msgnum: {0}, sendBytes: {1}", msgNum, sendBytes);
 //						Debug.LogFormat(DateTime.Now.ToString("hh.mm.ss.ffffff") + ":sending seqs: {0}", seqs);
-                        connection.newNet.Log.Info("sending seqs: {0}, {1}", seqs,
-                            DateTime.Now.ToString("hh.mm.ss.ffffff"));
 //						Debug.LogFormat("reliable send");
                         connection.Send(packetData, "seqs: " + seqs);
                         seqs = "";
@@ -508,19 +503,21 @@ namespace Network
                     nums = nums
                 });
             }
-
-            if (nums != null)
-            {
-                newNet.Log.Info("added to sendQueue {0}, {1} bytes", nums, data.Length);
-            }
         }
 
         internal void SendUnreliable(byte[] data)
         {
-            var sendBuf = new byte[data.Length + 2];
-            sendBuf[0] = (byte) NetMessage.Payload;
-            sendBuf[1] = (byte) QOS.Unreliable;
-            Array.Copy(data, 0, sendBuf, 2, data.Length);
+            var sendBuf = new byte[data.Length + 4];
+            using (var ms = new MemoryStream(sendBuf, 0, data.Length + 4, true, true))
+            using (var bw = new BinaryWriter(ms))
+            {
+                ms.WriteByte((byte) NetMessage.Payload);
+                ms.WriteByte((byte) QOS.Unreliable);
+                bw.Write(uSeqId);
+                bw.Write(data);
+                uSeqId++;
+            }
+
             Send(sendBuf);
         }
 
@@ -529,7 +526,6 @@ namespace Network
             //todo: оставляю пока равным 0,1 всегда
             this.rtt = new TimeSpan(
                 (long) (NewNet.SmoothFactor * rtt.Ticks + (1 - NewNet.SmoothFactor) * this.rtt.Ticks));
-            newNet.Log.Info("curRtt: {0}, estimRtt: {1}", rtt, this.rtt);
         }
     }
 
@@ -561,7 +557,6 @@ namespace Network
 
     public class NewNet
     {
-        internal readonly Log Log;
         public const int SeqBufSize = 1024;
         public const int MaxDataSize = 1000;
         public const int TryConnectLimit = 10;
@@ -591,7 +586,6 @@ namespace Network
             }
 
             socket.Bind(endPoint);
-            Log = Logs.Create(GetType().Name, sourceName);
         }
 
         /// <summary>
@@ -685,7 +679,6 @@ namespace Network
             var connection = connections[connId];
             if (connection.accepted)
             {
-                Log.Info("Send disconnect to connId {0}", connId);
                 var data = new[] {(byte) NetMessage.Disconnect};
                 for (var i = 1; i <= 10; i++)
                 {
@@ -731,13 +724,13 @@ namespace Network
             {
                 if (sendQueue.Count > 0)
                 {
-                    var sendItem = sendQueue.Dequeue();
-                    var t1 = DateTime.Now;
-                    var n = socket.SendTo(sendItem.data, sendItem.endPoint);
-                    if (sendItem.nums != null)
+                    SendItem sendItem;
+                    lock (sendQueue)
                     {
-                        Log.Info("sent {0}, {1} bytes, {2}, {3}", sendItem.nums, n, DateTime.Now - t1,DateTime.Now.ToString("hh.mm.ss.ffffff"));
+                        sendItem = sendQueue.Dequeue();
                     }
+
+                    socket.SendTo(sendItem.data, sendItem.endPoint);
                 }
             }
         }
@@ -808,7 +801,6 @@ namespace Network
                     }
                     catch (Exception e)
                     {
-                        Log.Info(e.Message);
                         throw e;
                     }
                 }
@@ -843,7 +835,15 @@ namespace Network
 
         public NetEvent Receive()
         {
-            return eventQueue.Count > 0 ? eventQueue.Dequeue() : new NetEvent {type = NetEventType.Nothing};
+            if (eventQueue.Count > 0)
+            {
+                lock (eventQueue)
+                {
+                    return eventQueue.Dequeue();
+                }
+            }
+
+            return null;
         }
 
         private void ProcessConnectRequest(IPEndPoint endPoint)
@@ -897,7 +897,6 @@ namespace Network
 
         private void ProcessConnectAccept(IPEndPoint endPoint)
         {
-            Log.Info("ConnectAccept received from {0}", endPoint);
             for (var i = 0; i < usedConnections.Length; i++)
             {
                 if (usedConnections[i] && connections[i].endPoint.Equals(endPoint) && !connections[i].accepted)
@@ -987,7 +986,6 @@ namespace Network
 
 //						Debug.Log("reliable data received:" + s);
                         //Debug.Log(DateTime.Now.ToString("hh.mm.ss.ffffff") + ":reliable data received:" + data.Length + " bytes");
-                        Log.Info("reliable data received:" + data.Length + " bytes");
                         err = conn.reliableReceiver.Receive(br);
                         break;
                     case QOS.Unreliable:
@@ -1004,7 +1002,6 @@ namespace Network
 
         public void StopListen()
         {
-            Log.Info("stopping all network threads");
             listening = false;
             for (var i = 0; i < usedConnections.Length; i++)
             {
