@@ -98,10 +98,11 @@ namespace Network
 
         private string ReceiveMessage(ushort seqId, byte[] data)
         {
+            Console.WriteLine($"{seqId} message received");
             if (GetRawMsg(seqId) != null)
             {
                 // Повторное получение сообщения - скипаем
-//				Debug.LogFormat("duplicated seqId ({0}) received - skipped", seqId);
+                Console.WriteLine($"duplicated seqId ({seqId}) received - skipped");
                 return null;
             }
 
@@ -309,6 +310,11 @@ namespace Network
             var index = seqId % NewNet.SeqBufSize;
             seqBuf[index] = seqId;
             queue[index] = rawSndMsg;
+            if (seqId % 1000 == 0)
+            {
+                Console.WriteLine($"{seqId} inserted");
+            }
+
             seqId++;
             return seqId;
         }
@@ -332,6 +338,8 @@ namespace Network
             var ack = br.ReadUInt16();
             //string sacks = "" + ack;
             var ackBits = br.ReadUInt32();
+            Console.WriteLine($"{DateTime.Now.ToString("hh.mm.ss.ffffff")} :received ack: {ack}:{ackBits}");
+
             var rawSndMsg = GetRawMsg(ack);
             if (rawSndMsg != null)
             {
@@ -415,6 +423,10 @@ namespace Network
                                         rawSndMsg.firstSendTime = DateTime.Now;
                                         rawSndMsg.sent = true;
                                     }
+                                    else
+                                    {
+                                        Console.WriteLine($"resending seqId {rawSndMsg.sequenceId}");
+                                    }
 
                                     rawSndMsg.lastSendTime = DateTime.Now;
                                     bw.Write((ushort) seqId);
@@ -477,6 +489,7 @@ namespace Network
         public void ReceiveUnreliable(BinaryReader br)
         {
             var sequenceId = br.ReadUInt16();
+            //Console.WriteLine(sequenceId);
             var data = br.ReadBytes((int) (br.BaseStream.Length - br.BaseStream.Position));
             // Закидываем в общую очередь всего полученного
             lock (newNet.eventQueue)
@@ -524,8 +537,8 @@ namespace Network
         public void UpdateRTT(TimeSpan rtt)
         {
             //todo: оставляю пока равным 0,1 всегда
-            this.rtt = new TimeSpan(
-                (long) (NewNet.SmoothFactor * rtt.Ticks + (1 - NewNet.SmoothFactor) * this.rtt.Ticks));
+//            this.rtt = new TimeSpan(
+//                (long) (NewNet.SmoothFactor * rtt.Ticks + (1 - NewNet.SmoothFactor) * this.rtt.Ticks));
         }
     }
 
@@ -572,6 +585,8 @@ namespace Network
         private bool[] usedConnections;
         internal Queue<NetEvent> eventQueue = new Queue<NetEvent>();
         internal Queue<SendItem> sendQueue = new Queue<SendItem>();
+        private static object sendLock = new object();
+        private static object receiveLock = new object();
 
         public NewNet(int maxConnections, IPEndPoint endPoint = null, string sourceName = null)
         {
@@ -624,7 +639,11 @@ namespace Network
             while (!connection.accepted && connection.tryConnectNum < TryConnectLimit)
             {
                 outBuffer[0] = (byte) NetMessage.ConnectRequest;
-                socket.SendTo(data, 1, SocketFlags.None, connection.endPoint);
+                lock (sendLock)
+                {
+                    socket.SendTo(data, 1, SocketFlags.None, connection.endPoint);
+                }
+
                 Thread.Sleep(connection.rtt);
                 connection.tryConnectNum++;
             }
@@ -730,7 +749,10 @@ namespace Network
                         sendItem = sendQueue.Dequeue();
                     }
 
-                    socket.SendTo(sendItem.data, sendItem.endPoint);
+                    lock (sendLock)
+                    {
+                        socket.SendTo(sendItem.data, sendItem.endPoint);
+                    }
                 }
             }
         }
@@ -750,7 +772,12 @@ namespace Network
                         // простой ReceiveFrom блокирует выполнение и не грузит CPU лишними проверками
                         //if (socket.Available > 0) {
 //							Debug.LogFormat("available {0}", socket.Available);
-                        var rcv = socket.ReceiveFrom(inBuffer, ref endPoint);
+                        int rcv;
+                        lock (receiveLock)
+                        {
+                            rcv = socket.ReceiveFrom(inBuffer, ref endPoint);
+                        }
+
 //                        Log.Info("{0} bytes received from {1}", rcv, endPoint);
                         ms.Position = 0;
                         var netMsg = (NetMessage) br.ReadByte();
@@ -768,23 +795,30 @@ namespace Network
                                 {
                                     // Все коннекты заняты => шлём отказ
                                     outBuffer[0] = (byte) NetMessage.ConnectDenied;
-                                    socket.SendTo(outBuffer, 1, SocketFlags.None, endPoint);
+                                    lock (sendLock)
+                                    {
+                                        socket.SendTo(outBuffer, 1, SocketFlags.None, endPoint);
+                                    }
                                 }
 
                                 break;
                             case NetMessage.Payload:
                                 var payload = new byte[rcv - 1];
-                                var s = "";
-                                for (var i = 0; i < rcv; i++)
-                                {
-                                    s += " " + inBuffer[i];
-                                }
-
+//                                var s = "";
+//                                for (var i = 0; i < rcv; i++)
+//                                {
+//                                    s += " " + inBuffer[i];
+//                                }
 //									Debug.Log("payload received:" + s);
 
 
                                 Array.Copy(inBuffer, 1, payload, 0, rcv - 1);
                                 err = ReceivePayload(payload, (IPEndPoint) endPoint);
+                                if (err != null)
+                                {
+                                    Console.WriteLine(err);
+                                }
+
                                 break;
                             case NetMessage.ConnectAccept:
                                 ProcessConnectAccept((IPEndPoint) endPoint);
@@ -835,9 +869,9 @@ namespace Network
 
         public NetEvent Receive()
         {
-            if (eventQueue.Count > 0)
+            lock (eventQueue)
             {
-                lock (eventQueue)
+                if (eventQueue.Count > 0)
                 {
                     return eventQueue.Dequeue();
                 }
@@ -875,9 +909,6 @@ namespace Network
                 // Добавляем в список акцептованных подключений
                 usedConnections[freeId] = true;
                 connections[freeId] = new Connection(freeId, endPoint, true, this);
-                // Отправляем ConnectAccept
-                socket.SendTo(new[] {(byte) NetMessage.ConnectAccept}, endPoint);
-                numConnections++;
                 lock (eventQueue)
                 {
                     // Закидываем в очередь событий установку соединения
@@ -887,11 +918,23 @@ namespace Network
                         connId = freeId
                     });
                 }
+
+                lock (sendLock)
+                {
+                    // Отправляем ConnectAccept
+                    socket.SendTo(new[] {(byte) NetMessage.ConnectAccept}, endPoint);
+                    Console.WriteLine("connectAccept sent");
+                }
+
+                numConnections++;
             }
             else
             {
-                // Отправляем ConnectDenied
-                socket.SendTo(new[] {(byte) NetMessage.ConnectDenied}, endPoint);
+                lock (sendLock)
+                {
+                    // Отправляем ConnectDenied
+                    socket.SendTo(new[] {(byte) NetMessage.ConnectDenied}, endPoint);
+                }
             }
         }
 
@@ -965,6 +1008,7 @@ namespace Network
             if (conn == null || !conn.accepted)
             {
                 // Получили пакет данных от незарегистрированного подключения - скипаем
+                Console.WriteLine("not registered");
                 return null;
             }
 

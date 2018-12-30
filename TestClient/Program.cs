@@ -38,12 +38,13 @@ namespace TestClient
         public void Sending()
         {
             var i = 0;
-            while (sending&&i<10000)
+            while (sending && i < 100)
             {
                 if (serverId >= 0)
                 {
-                    net.Send(serverId, sendSample, false);
+                    net.Send(serverId, sendSample, true);
                     i++;
+                    Thread.Sleep(10);
                 }
             }
         }
@@ -63,6 +64,7 @@ namespace TestClient
                             int port;
                             string err;
                             net.GetConnectionInfo(netEvent.connId, out ip, out port, out err);
+                            Console.WriteLine($"Connected to server {ip}:{port}");
                             if (new IPEndPoint(IPAddress.Parse(ip), port).Equals(serverEndpoint))
                             {
                                 serverId = netEvent.connId;
@@ -79,7 +81,6 @@ namespace TestClient
                             break;
                     }
                 }
-
             }
         }
     }
@@ -108,6 +109,7 @@ namespace TestClient
         public void Receiving()
         {
             var t1 = DateTime.Now;
+            var i = 0;
             while (receiving)
             {
                 var netEvent = net.Receive();
@@ -120,12 +122,14 @@ namespace TestClient
                             int port;
                             string err;
                             net.GetConnectionInfo(netEvent.connId, out ip, out port, out err);
+                            Console.WriteLine($"{ip}:{port} connected");
                             break;
                         case NetEventType.Data:
-                            if (!netEvent.reliable && netEvent.sequenceId % 1000 == 0)
+                            i++;
+                            if (netEvent.reliable && i % 1 == 0)
                             {
                                 Console.WriteLine(
-                                    $"{netEvent.sequenceId} unreliable messages received at {DateTime.Now - t1}");
+                                    $"{i} reliable messages received, last {netEvent.sequenceId} at {DateTime.Now - t1}");
                             }
 
                             break;
