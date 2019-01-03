@@ -537,8 +537,9 @@ namespace Network
         public void UpdateRTT(TimeSpan rtt)
         {
             //todo: оставляю пока равным 0,1 всегда
-//            this.rtt = new TimeSpan(
-//                (long) (NewNet.SmoothFactor * rtt.Ticks + (1 - NewNet.SmoothFactor) * this.rtt.Ticks));
+            this.rtt = new TimeSpan(
+                (long) (NewNet.SmoothFactor * rtt.Ticks + (1 - NewNet.SmoothFactor) * this.rtt.Ticks));
+            Console.WriteLine($"rtt: {this.rtt}");
         }
     }
 

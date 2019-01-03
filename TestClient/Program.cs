@@ -38,11 +38,11 @@ namespace TestClient
         public void Sending()
         {
             var i = 0;
-            while (sending && i < 10000)
+            while (sending && i < 1000)
             {
                 if (serverId >= 0)
                 {
-                    net.Send(serverId, sendSample, false);
+                    net.Send(serverId, sendSample, true);
                     i++;
                     Thread.Sleep(1);
                 }
