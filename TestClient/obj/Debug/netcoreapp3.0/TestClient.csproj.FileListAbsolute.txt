@@ -1,0 +1,12 @@
+C:\Users\Juz\RiderProjects\TestClient\TestClient\bin\Debug\netcoreapp3.0\TestClient.exe
+C:\Users\Juz\RiderProjects\TestClient\TestClient\bin\Debug\netcoreapp3.0\TestClient.deps.json
+C:\Users\Juz\RiderProjects\TestClient\TestClient\bin\Debug\netcoreapp3.0\TestClient.runtimeconfig.json
+C:\Users\Juz\RiderProjects\TestClient\TestClient\bin\Debug\netcoreapp3.0\TestClient.runtimeconfig.dev.json
+C:\Users\Juz\RiderProjects\TestClient\TestClient\bin\Debug\netcoreapp3.0\TestClient.dll
+C:\Users\Juz\RiderProjects\TestClient\TestClient\bin\Debug\netcoreapp3.0\TestClient.pdb
+C:\Users\Juz\RiderProjects\TestClient\TestClient\obj\Debug\netcoreapp3.0\TestClient.csprojAssemblyReference.cache
+C:\Users\Juz\RiderProjects\TestClient\TestClient\obj\Debug\netcoreapp3.0\TestClient.csproj.CoreCompileInputs.cache
+C:\Users\Juz\RiderProjects\TestClient\TestClient\obj\Debug\netcoreapp3.0\TestClient.AssemblyInfoInputs.cache
+C:\Users\Juz\RiderProjects\TestClient\TestClient\obj\Debug\netcoreapp3.0\TestClient.AssemblyInfo.cs
+C:\Users\Juz\RiderProjects\TestClient\TestClient\obj\Debug\netcoreapp3.0\TestClient.dll
+C:\Users\Juz\RiderProjects\TestClient\TestClient\obj\Debug\netcoreapp3.0\TestClient.pdb

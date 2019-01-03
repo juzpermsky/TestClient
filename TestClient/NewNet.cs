@@ -507,7 +507,7 @@ namespace Network
 
         public void Send(byte[] data, string nums = null)
         {
-            lock (newNet.sendQueue)
+            lock (newNet.sendQueueLock)
             {
                 newNet.sendQueue.Enqueue(new SendItem
                 {
@@ -585,8 +585,8 @@ namespace Network
         private bool[] usedConnections;
         internal Queue<NetEvent> eventQueue = new Queue<NetEvent>();
         internal Queue<SendItem> sendQueue = new Queue<SendItem>();
-        private static object sendLock = new object();
-        private static object receiveLock = new object();
+        private static object socketLock = new object();
+        public object sendQueueLock = new object();
 
         public NewNet(int maxConnections, IPEndPoint endPoint = null, string sourceName = null)
         {
@@ -639,7 +639,7 @@ namespace Network
             while (!connection.accepted && connection.tryConnectNum < TryConnectLimit)
             {
                 outBuffer[0] = (byte) NetMessage.ConnectRequest;
-                lock (sendLock)
+                lock (socketLock)
                 {
                     socket.SendTo(data, 1, SocketFlags.None, connection.endPoint);
                 }
@@ -739,19 +739,27 @@ namespace Network
 
         private void Sending()
         {
+            var t1 = DateTime.Now;
+            var msgCount = 0;
             while (sending)
             {
                 if (sendQueue.Count > 0)
                 {
                     SendItem sendItem;
-                    lock (sendQueue)
+                    lock (sendQueueLock)
                     {
                         sendItem = sendQueue.Dequeue();
                     }
 
-                    lock (sendLock)
+                    lock (socketLock)
                     {
                         socket.SendTo(sendItem.data, sendItem.endPoint);
+                        msgCount++;
+                        if (msgCount % 10 == 0)
+                        {
+                            var t2 = DateTime.Now;
+                            Console.WriteLine($"{msgCount} datagrams sent after {t2 - t1}");
+                        }
                     }
                 }
             }
@@ -773,10 +781,7 @@ namespace Network
                         //if (socket.Available > 0) {
 //							Debug.LogFormat("available {0}", socket.Available);
                         int rcv;
-                        lock (receiveLock)
-                        {
-                            rcv = socket.ReceiveFrom(inBuffer, ref endPoint);
-                        }
+                        rcv = socket.ReceiveFrom(inBuffer, ref endPoint);
 
 //                        Log.Info("{0} bytes received from {1}", rcv, endPoint);
                         ms.Position = 0;
@@ -795,7 +800,7 @@ namespace Network
                                 {
                                     // Все коннекты заняты => шлём отказ
                                     outBuffer[0] = (byte) NetMessage.ConnectDenied;
-                                    lock (sendLock)
+                                    lock (socketLock)
                                     {
                                         socket.SendTo(outBuffer, 1, SocketFlags.None, endPoint);
                                     }
@@ -919,7 +924,7 @@ namespace Network
                     });
                 }
 
-                lock (sendLock)
+                lock (socketLock)
                 {
                     // Отправляем ConnectAccept
                     socket.SendTo(new[] {(byte) NetMessage.ConnectAccept}, endPoint);
@@ -930,7 +935,7 @@ namespace Network
             }
             else
             {
-                lock (sendLock)
+                lock (socketLock)
                 {
                     // Отправляем ConnectDenied
                     socket.SendTo(new[] {(byte) NetMessage.ConnectDenied}, endPoint);
