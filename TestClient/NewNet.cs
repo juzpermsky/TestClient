@@ -343,6 +343,7 @@ namespace Network
         public void ReceiveAck(BinaryReader br)
         {
             var ack = br.ReadUInt16();
+
             //string sacks = "" + ack;
             var ackBits = br.ReadUInt32();
 
@@ -360,6 +361,12 @@ namespace Network
 
             Console.WriteLine($"{DateTime.Now.ToString("hh.mm.ss.ffffff")} :received ack: {ack}:{ackBits}");
 
+            if (SeqLessThan(ack, firstUnackedSeqId))
+            {
+                // Получили очень старый ack, нет смысла смотреть ackBits - просто выходим здесь
+                return;
+            }
+
             var rawSndMsg = (RawSndMsg) GetRawMsg(ack);
             if (rawSndMsg != null)
             {
@@ -371,14 +378,14 @@ namespace Network
 
                 if (firstUnackedSeqId == ack)
                 {
+                    firstUnackedSeqId++;
+                    return;
                 }
             }
 
-            //todo: Тут разобраться с пересчетом firstUnackedSeqId - идем по ackbits в обратном порядке поэтому надо как-то по хитрому 
-            var firstUnacked = firstUnackedSeqId;
             for (var i = 1; i <= 32; i++)
             {
-                var seqId = (ushort)(ack - i);
+                var seqId = (ushort) (ack - i);
                 if ((ackBits & 1) == 1)
                 {
                     //sacks += "," + seqId;
@@ -390,11 +397,12 @@ namespace Network
                         seqBuf[index] = 0xffffffff;
                         msgBuf[index] = null;
                     }
-                }
-                else
-                {
-                    //todo: stop here
-                    firstUnacked = seqId;
+
+                    if (firstUnackedSeqId == seqId)
+                    {
+                        firstUnackedSeqId++;
+                        return;
+                    }
                 }
 
                 ackBits >>= 1;
