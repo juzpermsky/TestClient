@@ -23,22 +23,90 @@ namespace Network
         Ack
     }
 
-    internal class ReliableReceiver
+    internal abstract class Reliable
     {
-        public Connection connection;
-        public RawRcvMsg[] queue = new RawRcvMsg[NewNet.SeqBufSize];
-        public uint[] seqBuf = new uint[NewNet.SeqBufSize];
-        public ushort expectedSeqId = 1;
-        public ushort recentSeqId;
-        public ushort processedSeqId;
-        private bool work;
+        protected Connection connection;
+        protected uint[] seqBuf = new uint[NewNet.SeqBufSize];
+        protected RawMsg[] msgBuf = new RawMsg[NewNet.SeqBufSize];
 
+        protected bool work;
 
-        public ReliableReceiver(Connection connection)
+        public Reliable(Connection connection)
         {
             this.connection = connection;
             // Готовим цикличный буфер
-            SeqBufReset();
+            BufsReset();
+        }
+
+        protected RawMsg GetRawMsg(ushort seqId)
+        {
+            var index = seqId % NewNet.SeqBufSize;
+            if (seqBuf[index] == seqId)
+            {
+                return msgBuf[index];
+            }
+
+            return null;
+        }
+
+        protected virtual string InsertRawMsg(ushort seqId, RawMsg rawMsg)
+        {
+            var index = seqId % NewNet.SeqBufSize;
+            seqBuf[index] = seqId;
+            msgBuf[index] = rawMsg;
+            return null;
+        }
+
+        protected static bool SeqGreaterThan(ushort seqId, ushort other)
+        {
+            return seqId > other && seqId - other <= 32768 || seqId < other && other - seqId > 32768;
+        }
+
+        protected static bool SeqLessThan(ushort seqId, ushort other)
+        {
+            return SeqGreaterThan(other, seqId);
+        }
+
+        protected void BufsReset()
+        {
+            if (seqBuf.Length == 0)
+            {
+                return;
+            }
+
+            seqBuf[0] = 0xffffffff;
+            msgBuf[0] = null;
+
+            for (var bp = 1; bp < seqBuf.Length; bp *= 2)
+            {
+                Array.Copy(seqBuf, 0, seqBuf, bp, Math.Min(seqBuf.Length - bp, bp));
+                Array.Copy(msgBuf, 0, msgBuf, bp, Math.Min(msgBuf.Length - bp, bp));
+            }
+        }
+
+        protected void BufsClean(ushort from, ushort to)
+        {
+            var from32 = (uint) from;
+            var to32 = (uint) to;
+            if (to32 < from32)
+            {
+                to32 += 65536;
+            }
+
+            var needFill = (to32 - from32) % seqBuf.Length + 1;
+            if (needFill == seqBuf.Length)
+            {
+                BufsReset();
+            }
+            else
+            {
+                for (var seqId = from32; needFill > 0; seqId++)
+                {
+                    seqBuf[seqId % seqBuf.Length] = 0xffffffff;
+                    msgBuf[seqId % msgBuf.Length] = null;
+                    needFill--;
+                }
+            }
         }
 
         public void Start()
@@ -53,22 +121,48 @@ namespace Network
             work = false;
         }
 
+        public abstract void Worker();
+    }
+
+    internal class ReliableReceiver : Reliable
+    {
+        public ushort expectedSeqId = 1;
+        public ushort recentSeqId;
+        public ushort processedSeqId;
+
         public string Receive(BinaryReader br)
         {
             var msgNum = br.ReadByte();
             var s = "";
+            var minSeqId = recentSeqId;
             while (msgNum > 0)
             {
                 var seqId = br.ReadUInt16();
+                // Определение ID самого старого сообщения в пачке
+                if (SeqLessThan(seqId, minSeqId))
+                {
+                    minSeqId = seqId;
+                }
+
                 s += seqId + ",";
                 // Размер сообщения
                 var msgBytes = br.ReadUInt16();
-                // Тело сообщения
-                var msgData = br.ReadBytes(msgBytes);
-                var err = ReceiveMessage(seqId, msgData);
-                if (err != null)
+                // Проверка быстрого skip'а сообщения полученного ранее
+                if (SeqLessThan(seqId, expectedSeqId))
                 {
-                    return err;
+                    // Всё, что меньше expectedSeqId, уже получено и упорядочено
+                    // Перематываем на следующее сообщение
+                    br.BaseStream.Position = br.BaseStream.Position + msgBytes;
+                }
+                else
+                {
+                    // Разбираем тело сообщения
+                    var msgData = br.ReadBytes(msgBytes);
+                    var err = ReceiveMessage(seqId, msgData);
+                    if (err != null)
+                    {
+                        return err;
+                    }
                 }
 
                 msgNum--;
@@ -80,14 +174,25 @@ namespace Network
             // Разобрали все сообщения, из reliable пакета. Теперь можно составить ack пакет
             var ack = recentSeqId;
             var ackBits = CreateAckBits(ack);
+            var ackSize = 8;
+            // Если в полученном пакете были сообщения, не покрытые ackBits, дополняем отправкой expectedSeqId - нужно увеличить на 2 байта
+            if (SeqLessThan(minSeqId, (ushort) (ack - 32)))
+            {
+                ackSize = 10;
+            }
 
-            using (var ms = new MemoryStream(new byte[8], 0, 8, true, true))
+            using (var ms = new MemoryStream(new byte[ackSize], 0, ackSize, true, true))
             using (var bw = new BinaryWriter(ms))
             {
                 ms.WriteByte((byte) NetMessage.Payload);
                 ms.WriteByte((byte) QOS.Ack);
                 bw.Write(ack);
                 bw.Write(ackBits);
+                if (ackSize == 10)
+                {
+                    // Дополняем отправкой expectedSeqId
+                    bw.Write(expectedSeqId);
+                }
 
 //				Debug.Log(DateTime.Now.ToString("hh.mm.ss.ffffff") + ":sending ack: " + ack);
                 connection.Send(ms.GetBuffer(), "ack: " + ack);
@@ -130,19 +235,7 @@ namespace Network
             return ackBits;
         }
 
-
-        private RawRcvMsg GetRawMsg(ushort seqId)
-        {
-            var index = seqId % NewNet.SeqBufSize;
-            if (seqBuf[index] == seqId)
-            {
-                return queue[index];
-            }
-
-            return null;
-        }
-
-        private string InsertRawMsg(ushort seqId, RawRcvMsg rawRcvMsg)
+        protected override string InsertRawMsg(ushort seqId, RawMsg rawRcvMsg)
         {
             if (SeqLessThan(seqId, (ushort) (recentSeqId - NewNet.SeqBufSize)))
             {
@@ -151,7 +244,8 @@ namespace Network
 
             if (SeqGreaterThan(seqId, (ushort) (recentSeqId + 1)))
             {
-                SeqBufClean((ushort) (recentSeqId + 1), (ushort) (seqId - 1));
+                // Зачищаем промежуточные значения
+                BufsClean((ushort) (recentSeqId + 1), (ushort) (seqId - 1));
             }
 
             if (SeqGreaterThan(seqId, recentSeqId))
@@ -159,66 +253,18 @@ namespace Network
                 recentSeqId = seqId;
             }
 
-//			Debug.LogFormat("inserting in reliable queue seqId ({0})", seqId);
-            var index = seqId % NewNet.SeqBufSize;
-            seqBuf[index] = seqId;
-            queue[index] = rawRcvMsg;
+            base.InsertRawMsg(seqId, rawRcvMsg);
+
             if (expectedSeqId == seqId)
             {
                 expectedSeqId++;
-//				Debug.LogFormat("expectedSeqId: {0}", expectedSeqId);
             }
 
             return null;
         }
 
-        private static bool SeqGreaterThan(ushort seqId, ushort other)
-        {
-            return seqId > other && seqId - other <= 32768 || seqId < other && other - seqId > 32768;
-        }
 
-        private static bool SeqLessThan(ushort seqId, ushort other)
-        {
-            return SeqGreaterThan(other, seqId);
-        }
-
-        private void SeqBufClean(ushort from, ushort to)
-        {
-            var from32 = (uint) from;
-            var to32 = (uint) to;
-            if (to32 < from32)
-            {
-                to32 += 65536;
-            }
-
-            if (to32 - from32 < NewNet.SeqBufSize)
-            {
-                for (var seqId = from32; seqId <= to32; seqId++)
-                {
-                    seqBuf[seqId % NewNet.SeqBufSize] = 0xffffffff;
-                }
-            }
-            else
-            {
-                SeqBufReset();
-            }
-        }
-
-        private void SeqBufReset()
-        {
-            if (seqBuf.Length == 0)
-            {
-                return;
-            }
-
-            seqBuf[0] = 0xffffffff;
-            for (var bp = 1; bp < seqBuf.Length; bp *= 2)
-            {
-                Array.Copy(seqBuf, 0, seqBuf, bp, Math.Min(seqBuf.Length - bp, bp));
-            }
-        }
-
-        private void Worker()
+        public override void Worker()
         {
             while (work)
             {
@@ -244,93 +290,54 @@ namespace Network
                     }
                     else
                     {
-                        System.Console.WriteLine("Cannot find seqId ({0})\n", processedSeqId + 1);
+                        Console.WriteLine("Cannot find seqId ({0})\n", processedSeqId + 1);
                     }
                 }
             }
         }
+
+        public ReliableReceiver(Connection connection) : base(connection)
+        {
+        }
     }
 
-    internal class RawRcvMsg
+
+    public abstract class RawMsg
     {
         public ushort sequenceId;
         public byte[] data;
     }
 
-    internal class RawSndMsg
+    internal class RawRcvMsg : RawMsg
+    {
+    }
+
+    internal class RawSndMsg : RawMsg
     {
         public bool sent;
-        public ushort sequenceId;
         public DateTime firstSendTime;
         public DateTime lastSendTime;
-        public byte[] data;
     }
 
-    internal class ReliableSender
+    internal class ReliableSender : Reliable
     {
-        public Connection connection;
         public ushort seqId = 1;
-        public uint[] seqBuf = new uint[NewNet.SeqBufSize];
-        public RawSndMsg[] queue = new RawSndMsg[NewNet.SeqBufSize];
-        private bool work;
 
-        public ReliableSender(Connection connection)
-        {
-            this.connection = connection;
-            // Готовим цикличный буфер
-            SeqBufReset();
-        }
 
-        public void Start()
-        {
-            work = true;
-            var workerThread = new Thread(Worker);
-            workerThread.Start();
-        }
+        /// Первый из неподтвержденных сообщений,
+        /// всё что до него, проверять и переотправлять не нужно
+        public ushort firstUnackedSeqId = 1;
 
-        public void Stop()
-        {
-            work = false;
-        }
-
-        public RawSndMsg GetRawMsg(ushort seqId)
-        {
-            var index = seqId % NewNet.SeqBufSize;
-            if (seqBuf[index] == seqId)
-            {
-                return queue[index];
-            }
-
-            return null;
-        }
-
-        public ushort InsertRawMsg(RawSndMsg rawSndMsg)
+        public void InsertRawMsg(RawSndMsg rawSndMsg)
         {
             rawSndMsg.sequenceId = seqId;
-            var index = seqId % NewNet.SeqBufSize;
-            seqBuf[index] = seqId;
-            queue[index] = rawSndMsg;
+            base.InsertRawMsg(seqId, rawSndMsg);
             if (seqId % 1000 == 0)
             {
                 Console.WriteLine($"{seqId} inserted");
             }
 
             seqId++;
-            return seqId;
-        }
-
-        private void SeqBufReset()
-        {
-            if (seqBuf.Length == 0)
-            {
-                return;
-            }
-
-            seqBuf[0] = 0xffffffff;
-            for (var bp = 1; bp < seqBuf.Length; bp *= 2)
-            {
-                Array.Copy(seqBuf, 0, seqBuf, bp, Math.Min(seqBuf.Length - bp, bp));
-            }
         }
 
         public void ReceiveAck(BinaryReader br)
@@ -338,32 +345,56 @@ namespace Network
             var ack = br.ReadUInt16();
             //string sacks = "" + ack;
             var ackBits = br.ReadUInt32();
+
+            // Проверим отправлялся ли expectedSeqId
+            if (br.BaseStream.Length == 10)
+            {
+                var expectedSeqId = br.ReadUInt16();
+                if (SeqLessThan(firstUnackedSeqId, expectedSeqId))
+                {
+                    // Всё что меньше expectedSeqId уже гарантированно доставлено
+                    BufsClean(firstUnackedSeqId, (ushort) (expectedSeqId - 1));
+                    firstUnackedSeqId = expectedSeqId;
+                }
+            }
+
             Console.WriteLine($"{DateTime.Now.ToString("hh.mm.ss.ffffff")} :received ack: {ack}:{ackBits}");
 
-            var rawSndMsg = GetRawMsg(ack);
+            var rawSndMsg = (RawSndMsg) GetRawMsg(ack);
             if (rawSndMsg != null)
             {
                 connection.UpdateRTT(DateTime.Now - rawSndMsg.firstSendTime);
                 var index = ack % NewNet.SeqBufSize;
                 // Удаляем данные из буфера и очереди
                 seqBuf[index] = 0xffffffff;
-                queue[index] = null;
+                msgBuf[index] = null;
+
+                if (firstUnackedSeqId == ack)
+                {
+                }
             }
 
+            //todo: Тут разобраться с пересчетом firstUnackedSeqId - идем по ackbits в обратном порядке поэтому надо как-то по хитрому 
+            var firstUnacked = firstUnackedSeqId;
             for (var i = 1; i <= 32; i++)
             {
+                var seqId = (ushort)(ack - i);
                 if ((ackBits & 1) == 1)
                 {
-                    var seqId = ack - i;
                     //sacks += "," + seqId;
-                    rawSndMsg = GetRawMsg((ushort) seqId);
+                    rawSndMsg = (RawSndMsg) GetRawMsg(seqId);
                     if (rawSndMsg != null)
                     {
                         var index = seqId % NewNet.SeqBufSize;
                         // Удаляем данные из буфера и очереди
                         seqBuf[index] = 0xffffffff;
-                        queue[index] = null;
+                        msgBuf[index] = null;
                     }
+                }
+                else
+                {
+                    //todo: stop here
+                    firstUnacked = seqId;
                 }
 
                 ackBits >>= 1;
@@ -372,7 +403,7 @@ namespace Network
 //			Debug.LogFormat(DateTime.Now.ToString("hh.mm.ss.ffffff") + ":received ack: {0}:{1}", ack, ackBits);
         }
 
-        public void Worker()
+        public override void Worker()
         {
             // Сбор reliable unacked сообщений в пачку и отправка
             var sendBytes = 0;
@@ -386,12 +417,17 @@ namespace Network
                     bw.Write((byte) NetMessage.Payload);
                     bw.Write((byte) QOS.Reliable);
                     bw.Write((byte) 0); // Под число сообщений
+                    //todo: Здесь нужно просматривать не весь буфер,
+                    // а только от firstUnackedSeqId до seqId
+                    var from = firstUnackedSeqId;
+                    var to = seqId;
+                    //todo: stop here
                     for (var index = 0; index < NewNet.SeqBufSize; index++)
                     {
                         var seqId = seqBuf[index];
                         if (seqId != 0xffffffff)
                         {
-                            var rawSndMsg = GetRawMsg((ushort) seqId);
+                            var rawSndMsg = (RawSndMsg) GetRawMsg((ushort) seqId);
                             if (rawSndMsg != null)
                             {
                                 if (sendBytes + rawSndMsg.data.Length + 4 > NewNet.MaxDataSize || msgNum == 255)
@@ -457,6 +493,10 @@ namespace Network
                         msgNum = 0;
                     }
                 }
+        }
+
+        public ReliableSender(Connection connection) : base(connection)
+        {
         }
     }
 
@@ -536,7 +576,6 @@ namespace Network
 
         public void UpdateRTT(TimeSpan rtt)
         {
-            //todo: оставляю пока равным 0,1 всегда
             this.rtt = new TimeSpan(
                 (long) (NewNet.SmoothFactor * rtt.Ticks + (1 - NewNet.SmoothFactor) * this.rtt.Ticks));
             Console.WriteLine($"rtt: {this.rtt}");
